@@ -1,0 +1,63 @@
+# Publishes the leaderboard table (rank.json) to the gh-pages branch.
+# Every 5 minutes it fetches the table from the rank server and, when it is a valid table of the
+# expected season and has changed, replaces the single commit on gh-pages.
+# Repository variables: RANK_SERVER_URL (https, no trailing slash) and RANK_SEASON.
+
+name: sync-rank
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-rank
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fetch, check and publish rank.json
+        env:
+          RANK_SERVER_URL: ${{ vars.RANK_SERVER_URL }}
+          RANK_SEASON: ${{ vars.RANK_SEASON }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$RANK_SERVER_URL" && test -n "$RANK_SEASON" || { echo "Set the RANK_SERVER_URL and RANK_SEASON variables."; exit 1; }
+          work="$(mktemp -d)"
+          # The server may be offline: the published table then simply stays as it is.
+          if ! curl --fail --silent --show-error --proto '=https' --max-time 30 --retry 2 --max-filesize 1048576 \
+               -o "$work/rank.json" "$RANK_SERVER_URL/rank.json"; then
+            echo "::notice::Rank server unreachable; nothing published."
+            exit 0
+          fi
+          # Only a real season table goes out: schema 3, eight boards, not a sample, the expected season.
+          if ! jq -e --arg season "$RANK_SEASON" \
+               '.schemaVersion == 3 and .isSample == false and .seasonId == $season and (.boards | length) == 8' \
+               "$work/rank.json" > /dev/null; then
+            echo "::warning::Unexpected rank.json (schema, sample flag, season or boards); nothing published."
+            exit 0
+          fi
+          # GitHub masks the token in logs. A failed fetch (first run: no gh-pages yet) just publishes again.
+          remote="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          mkdir "$work/site" && cd "$work/site"
+          git init -q -b gh-pages
+          if git fetch -q --depth=1 "$remote" gh-pages 2>/dev/null \
+             && git show FETCH_HEAD:rank.json > ../current.json 2>/dev/null \
+             && cmp -s ../current.json ../rank.json; then
+            echo "rank.json unchanged"
+            exit 0
+          fi
+          cp ../rank.json rank.json
+          touch .nojekyll
+          git add rank.json .nojekyll
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -q -m "rank.json $(date -u +%Y-%m-%dT%H:%MZ)"
+          git push -q --force "$remote" gh-pages
+          echo "rank.json published"
