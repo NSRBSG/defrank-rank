@@ -37,11 +37,11 @@ jobs:
             echo "::notice::Rank server unreachable; nothing published."
             exit 0
           fi
-          # Only a real season table goes out: schema 3, eight boards, not a sample, the expected season.
+          # Only a real season table goes out: schema 3, eight boards, not a sample, non-negative integer generation, the expected season.
           if ! jq -e --arg season "$RANK_SEASON" \
-               '.schemaVersion == 3 and .isSample == false and .seasonId == $season and (.boards | length) == 8' \
+               '.schemaVersion == 3 and .isSample == false and .seasonId == $season and (.generation | type) == "number" and (.generation | floor) == .generation and .generation >= 0 and (.boards | length) == 8' \
                "$work/rank.json" > /dev/null; then
-            echo "::warning::Unexpected rank.json (schema, sample flag, season or boards); nothing published."
+            echo "::warning::Unexpected rank.json (schema, sample flag, generation, season or boards); nothing published."
             exit 0
           fi
           # GitHub masks the token in logs. A failed fetch (first run: no gh-pages yet) just publishes again.
@@ -49,10 +49,17 @@ jobs:
           mkdir "$work/site" && cd "$work/site"
           git init -q -b gh-pages
           if git fetch -q --depth=1 "$remote" gh-pages 2>/dev/null \
-             && git show FETCH_HEAD:rank.json > ../current.json 2>/dev/null \
-             && cmp -s ../current.json ../rank.json; then
-            echo "rank.json unchanged"
-            exit 0
+             && git show FETCH_HEAD:rank.json > ../current.json 2>/dev/null; then
+            if cmp -s ../current.json ../rank.json; then
+              echo "rank.json unchanged"
+              exit 0
+            fi
+            if jq -e --slurpfile next ../rank.json \
+               '.seasonId == $next[0].seasonId and (.generation | type) == "number" and (.generation | floor) == .generation and $next[0].generation < .generation' \
+               ../current.json > /dev/null 2>&1; then
+              echo "::error::Refusing generation downgrade for season $RANK_SEASON"
+              exit 1
+            fi
           fi
           cp ../rank.json rank.json
           touch .nojekyll
